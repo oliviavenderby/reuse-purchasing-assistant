@@ -1,21 +1,29 @@
-# find_next_buy.py
-# ReUseBricks LEGO Investment Assistant — Optimized Basket Version
-# Full code — ready to run in Streamlit
+# invest_score_demo.py
+# Multi-factor LEGO investment score demo (uses BrickEconomy + BrickLink + Brickset metrics)
+#
+# Quick start:
+#   pip install streamlit pandas numpy
+#   streamlit run invest_score_demo.py
+#
+# By default it loads 'combined_sets.csv' (from the sample I generated).
+# You can also upload your own CSV with the same columns.
 
 from __future__ import annotations
 import math
-from collections import Counter, defaultdict
 from datetime import datetime
-from typing import List, Tuple
+from typing import Dict, List
 
 import numpy as np
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title="ReUseBricks Investment Assistant", page_icon="🧱", layout="wide")
-st.title("🧱 ReUseBricks — Investment Assistant")
+st.set_page_config(page_title="LEGO Investment Score — Demo", page_icon="🧱", layout="wide")
+st.title("🧱 LEGO Investment Score — Demo")
+st.caption("Deterministic, explainable scoring from BrickEconomy + BrickLink + Brickset style metrics (no LLM).")
 
-# ---------------------- Utility Functions ----------------------
+DEFAULT_FILE = "combined_sets.csv"  # change if you move the sample
+
+# ----------------------- Helpers -----------------------
 
 def zscore(s: pd.Series) -> pd.Series:
     s = pd.to_numeric(s, errors="coerce")
@@ -38,24 +46,12 @@ def safe_pct(numer, denom) -> float:
     except Exception:
         return 0.0
 
-def dollar_round(x: float) -> int:
-    try:
-        return int(max(0, round(float(x))))
-    except Exception:
-        return 0
-
-def hybrid_utility(row, a_score=0.6, b_roi=0.3, c_profit=0.1):
-    score = float(row.get("score", 0.0)) / 100.0
-    roi   = float(row.get("sealed_roi_pct", 0.0))
-    profit = float(row.get("current_new_price", 0.0) - row.get("target_buy_price", 0.0))
-    return max(0.0, a_score*score + b_roi*roi + c_profit*(profit / 100.0))
-
-# ---------------------- Sidebar ----------------------
+# ----------------------- Sidebar -----------------------
 
 with st.sidebar:
-    st.subheader("Load Data")
-    file = st.file_uploader("Upload CSV", type=["csv"])
-    st.caption("Must include all required columns for scoring.")
+    st.subheader("Load data")
+    file = st.file_uploader("Upload a combined CSV", type=["csv"])
+    st.caption("If omitted, the app tries to load 'combined_sets.csv' next to this script.")
 
     st.markdown("---")
     st.subheader("Weights")
@@ -65,84 +61,106 @@ with st.sidebar:
     w_sent   = st.slider("Sentiment", 0.0, 1.0, 0.10, 0.01)
     w_risk   = st.slider("Risk penalty", 0.0, 1.0, 0.10, 0.01)
 
-    desired_discount_pct = st.slider("Target discount off retail (%)", 0, 50, 20, 1)
+    st.markdown("---")
+    st.subheader("Buy assumptions")
+    desired_discount_pct = st.slider("Desired discount off retail for buys", 0, 50, 20, 1)
+    st.caption("Used only in ROI displays; core score uses normalized metrics.")
+
     show_debug = st.checkbox("Debug columns", value=False)
 
-# ---------------------- Load ----------------------
+# ----------------------- Load -----------------------
 
 def load_dataset(upload):
     if upload:
         return pd.read_csv(upload)
-    st.error("Please upload a CSV file.")
-    st.stop()
+    try:
+        return pd.read_csv(DEFAULT_FILE)
+    except Exception:
+        st.error("Couldn't load data. Upload a CSV with the expected columns.")
+        st.stop()
 
 df = load_dataset(file)
 
-# Required columns
 required_cols = [
     "set_num","name","theme","year","pieces","minifigs","retail_price",
     "current_value_new","current_value_used",
-    "forecast_growth_2y_pct","forecast_growth_5y_pct",
+    "forecast_new_2y","forecast_new_5y","forecast_growth_2y_pct","forecast_growth_5y_pct",
     "growth_last_year_pct","growth_12m_pct",
     "bl_current_avg_new","bl_qty_new","bl_lots_new","bl_current_avg_used","bl_qty_used","bl_lots_used",
-    "bl_sold_qty_new","bl_times_sold_new","bl_sold_qty_used","bl_times_sold_used",
-    "brickset_rating","users_owned","users_wanted",
-    "sealed_roi_pct","part_out_roi_pct","rerelease_risk","units_sold_30d","part_out_value"
+    "bl_6mo_avg_new","bl_sold_qty_new","bl_times_sold_new","bl_6mo_avg_used","bl_sold_qty_used","bl_times_sold_used",
+    "brickset_rating","users_owned","users_wanted"
 ]
 missing = [c for c in required_cols if c not in df.columns]
 if missing:
     st.error(f"Missing required columns: {missing}")
     st.stop()
 
-# ---------------------- Feature Engineering ----------------------
+# ----------------------- Feature Engineering -----------------------
 
+# Age
 today_year = datetime.utcnow().year
 df["age_years"] = (today_year - pd.to_numeric(df["year"], errors="coerce")).clip(lower=0)
 
-df["available_qty"] = df["bl_qty_new"].fillna(0) + df["bl_qty_used"].fillna(0)
-df["sold_qty_total"] = df["bl_sold_qty_new"].fillna(0) + df["bl_sold_qty_used"].fillna(0)
+# Sell-through rate (rough): sold over available inventory
+df["available_qty"] = pd.to_numeric(df["bl_qty_new"], errors="coerce").fillna(0) + \
+                      pd.to_numeric(df["bl_qty_used"], errors="coerce").fillna(0)
+df["sold_qty_total"] = pd.to_numeric(df["bl_sold_qty_new"], errors="coerce").fillna(0) + \
+                       pd.to_numeric(df["bl_sold_qty_used"], errors="coerce").fillna(0)
 df["sell_through"] = df.apply(lambda r: safe_pct(r["sold_qty_total"], r["sold_qty_total"] + r["available_qty"]), axis=1)
 
-df["margin_new_vs_retail"] = (df["bl_current_avg_new"] - df["retail_price"]) / df["retail_price"]
-df["margin_used_vs_retail"] = (df["bl_current_avg_used"] - df["retail_price"]) / df["retail_price"]
+# Margin proxies
+df["margin_new_vs_retail"] = (pd.to_numeric(df["bl_current_avg_new"], errors="coerce") - pd.to_numeric(df["retail_price"], errors="coerce")) / pd.to_numeric(df["retail_price"], errors="coerce")
+df["margin_used_vs_retail"] = (pd.to_numeric(df["bl_current_avg_used"], errors="coerce") - pd.to_numeric(df["retail_price"], errors="coerce")) / pd.to_numeric(df["retail_price"], errors="coerce")
 
-df["target_buy_price"] = df["retail_price"] * (1 - desired_discount_pct/100.0)
-df["roi_new_vs_target"] = (df["bl_current_avg_new"] - df["target_buy_price"]) / df["target_buy_price"]
+# ROI vs target buy (for display only)
+df["target_buy_price"] = pd.to_numeric(df["retail_price"], errors="coerce") * (1 - desired_discount_pct/100.0)
+df["roi_new_vs_target"] = (pd.to_numeric(df["bl_current_avg_new"], errors="coerce") - df["target_buy_price"]) / df["target_buy_price"]
+df["roi_used_vs_target"] = (pd.to_numeric(df["bl_current_avg_used"], errors="coerce") - df["target_buy_price"]) / df["target_buy_price"]
 
-df["competition_lots"] = df["bl_lots_new"].fillna(0) + df["bl_lots_used"].fillna(0)
-df["volatility_proxy"] = (df["growth_last_year_pct"] - df["growth_12m_pct"]).abs()
+# Competition & volatility proxies (risk)
+df["competition_lots"] = pd.to_numeric(df["bl_lots_new"], errors="coerce").fillna(0) + pd.to_numeric(df["bl_lots_used"], errors="coerce").fillna(0)
+df["volatility_proxy"] = (pd.to_numeric(df["growth_last_year_pct"], errors="coerce") - pd.to_numeric(df["growth_12m_pct"], errors="coerce")).abs()
 
-df["wanted_owned_ratio"] = df["users_wanted"] / (df["users_owned"] + 1)
+# Sentiment proxies
+df["wanted_owned_ratio"] = (pd.to_numeric(df["users_wanted"], errors="coerce")) / (pd.to_numeric(df["users_owned"], errors="coerce") + 1)
+df["brickset_rating"] = pd.to_numeric(df["brickset_rating"], errors="coerce")
 
-# ---------------------- Subscores ----------------------
+# ----------------------- Subscores -----------------------
 
+# Growth: long-term + short-term + age tailwind
 growth_sub = (
-    0.4 * zscore(df["forecast_growth_2y_pct"]) +
-    0.4 * zscore(df["forecast_growth_5y_pct"]) +
-    0.2 * zscore(df["growth_12m_pct"]) +
-    0.1 * zscore(df["age_years"])
+    0.4 * zscore(pd.to_numeric(df["forecast_growth_2y_pct"], errors="coerce")) +
+    0.4 * zscore(pd.to_numeric(df["forecast_growth_5y_pct"], errors="coerce")) +
+    0.2 * zscore(pd.to_numeric(df["growth_12m_pct"], errors="coerce")) +
+    0.1 * zscore(pd.to_numeric(df["age_years"], errors="coerce"))  # small weight for EOL proximity
 )
 
+# Liquidity: sell-through + sold qty + times sold
 liquidity_sub = (
     0.5 * zscore(df["sell_through"]) +
-    0.3 * zscore(df["sold_qty_total"]) +
-    0.2 * zscore(df["bl_times_sold_new"] + df["bl_times_sold_used"])
+    0.3 * zscore(pd.to_numeric(df["sold_qty_total"], errors="coerce")) +
+    0.2 * zscore(pd.to_numeric(df["bl_times_sold_new"], errors="coerce") + pd.to_numeric(df["bl_times_sold_used"], errors="coerce"))
 )
 
+# Margin: current market premium vs retail (favor new a bit more for sealed investors)
 margin_sub = (
     0.6 * zscore(df["margin_new_vs_retail"]) +
     0.4 * zscore(df["margin_used_vs_retail"])
 )
 
+# Sentiment: rating + demand > ownership
 sentiment_sub = (
     0.6 * zscore(df["brickset_rating"]) +
     0.4 * zscore(df["wanted_owned_ratio"])
 )
 
+# Risk: competition + volatility (higher is worse)
 risk_sub = (
     0.6 * zscore(df["competition_lots"]) +
     0.4 * zscore(df["volatility_proxy"])
 )
+
+# ----------------------- Final Score -----------------------
 
 raw = (
     w_growth * growth_sub +
@@ -154,148 +172,64 @@ raw = (
 
 df["score"] = minmax_0_100(raw)
 
-# ---------------------- Basket Optimizer ----------------------
+# ----------------------- Explanations (rule-based) -----------------------
 
-def suggest_basket_optimized(
-    df: pd.DataFrame,
-    budget_total: float,
-    *,
-    objective_weights=(0.6, 0.3, 0.1),
-    theme_cap: int = 2,
-    min_liquidity_30d: int = 0,
-    max_avg_risk: float = 0.30,
-    prefer_sealed: bool = True,
-    require_roi_floor: float = 0.0
-) -> Tuple[pd.DataFrame, float]:
-    if df.empty:
-        return pd.DataFrame(columns=df.columns), 0.0
+med = {
+    "forecast_growth_5y_pct": pd.to_numeric(df["forecast_growth_5y_pct"], errors="coerce").median(),
+    "sell_through": df["sell_through"].median(),
+    "margin_new_vs_retail": df["margin_new_vs_retail"].median(),
+    "brickset_rating": df["brickset_rating"].median(),
+    "wanted_owned_ratio": df["wanted_owned_ratio"].median(),
+    "competition_lots": df["competition_lots"].median(),
+    "volatility_proxy": df["volatility_proxy"].median(),
+}
 
-    roi_col = "sealed_roi_pct" if prefer_sealed else "part_out_roi_pct"
+def reasons(row: pd.Series) -> List[str]:
+    msgs = []
+    if row["forecast_growth_5y_pct"] >= med["forecast_growth_5y_pct"]:
+        msgs.append("Strong long-term appreciation forecast (5y).")
+    if row["sell_through"] >= med["sell_through"]:
+        msgs.append("Healthy sell-through (demand > supply).")
+    if row["margin_new_vs_retail"] >= med["margin_new_vs_retail"]:
+        msgs.append("Attractive market premium vs retail (new).")
+    if row["brickset_rating"] >= med["brickset_rating"]:
+        msgs.append("Well-reviewed by the community.")
+    if row["wanted_owned_ratio"] >= med["wanted_owned_ratio"]:
+        msgs.append("High wanted/owned ratio (latent demand).")
+    if row["competition_lots"] <= med["competition_lots"]:
+        msgs.append("Lower competition (fewer active lots).")
+    if row["volatility_proxy"] <= med["volatility_proxy"]:
+        msgs.append("Stable recent growth (lower volatility).")
+    if not msgs:
+        msgs.append("Balanced profile across growth, liquidity, and margin.")
+    return msgs
 
-    mask = (
-        df["target_buy_price"].fillna(0) > 0
-    ) & (
-        df["units_sold_30d"].fillna(0) >= min_liquidity_30d
-    ) & (
-        df[roi_col].fillna(-9e9) >= require_roi_floor
-    )
-    items = df.loc[mask].copy()
-    if items.empty:
-        return pd.DataFrame(columns=df.columns), 0.0
+# ----------------------- Display -----------------------
 
-    prices = items["target_buy_price"].astype(float).map(dollar_round).tolist()
-    themes  = items["theme"].fillna("Unknown").tolist()
-    risks   = items["rerelease_risk"].fillna(0.15).astype(float).tolist()
+st.subheader("Ranked sets")
+view_cols = [
+    "score","set_num","name","theme","year","retail_price",
+    "bl_current_avg_new","bl_current_avg_used",
+    "forecast_growth_2y_pct","forecast_growth_5y_pct",
+    "growth_last_year_pct","growth_12m_pct",
+    "sell_through","margin_new_vs_retail","brickset_rating","wanted_owned_ratio"
+]
+show = df[view_cols].sort_values("score", ascending=False).copy()
+show["score"] = show["score"].round(1)
+for c in ["retail_price","bl_current_avg_new","bl_current_avg_used"]:
+    show[c] = show[c].map(lambda x: f"${x:,.2f}")
+for p in ["forecast_growth_2y_pct","forecast_growth_5y_pct","growth_last_year_pct","growth_12m_pct","sell_through","margin_new_vs_retail","wanted_owned_ratio"]:
+    show[p] = show[p].map(lambda x: f"{x*100:.1f}%" if abs(x) < 10 else f"{x:.2f}") if p in ["sell_through","margin_new_vs_retail"] else show[p].map(lambda x: f"{x:.2f}")
 
-    util = []
-    a,b,c = objective_weights
-    for _, r in items.iterrows():
-        util.append(hybrid_utility(r, a_score=a, b_roi=b, c_profit=c))
-    values = util
+st.dataframe(show.reset_index(drop=True), use_container_width=True, height=420)
 
-    W = dollar_round(budget_total)
-    n = len(values)
-    if W <= 0:
-        return pd.DataFrame(columns=df.columns), 0.0
+st.subheader("Why these scored well")
+for _, row in df.sort_values("score", ascending=False).head(3).iterrows():
+    with st.expander(f"#{row['set_num']} — {row['name']} (Score {row['score']:.1f})"):
+        for m in reasons(row):
+            st.write(f"• {m}")
 
-    dp = [0.0] * (W + 1)
-    choose = [[False]*n for _ in range(W + 1)]
-
-    for i in range(n):
-        w_i = prices[i]
-        v_i = values[i]
-        if w_i <= 0:
-            continue
-        for w in range(W, w_i-1, -1):
-            cand = dp[w - w_i] + v_i
-            if cand > dp[w]:
-                dp[w] = cand
-                choose[w] = choose[w - w_i].copy()
-                choose[w][i] = True
-
-    w_star = max(range(W+1), key=lambda w: dp[w])
-    chosen_idx = [i for i,flag in enumerate(choose[w_star]) if flag]
-
-    sel = items.iloc[chosen_idx].copy()
-
-    from collections import Counter
-    themed = Counter(sel["theme"])
-    if any(c > theme_cap for c in themed.values()):
-        sel["price_$"] = sel["target_buy_price"].astype(float)
-        sel["util"] = sel.apply(lambda r: hybrid_utility(r, a_score=a, b_roi=b, c_profit=c), axis=1)
-        sel["u_per_$"] = sel["util"] / sel["price_$"].replace(0, np.nan)
-        keep = []
-        from collections import defaultdict
-        by_theme = defaultdict(list)
-        for idx, r in sel.iterrows():
-            by_theme[r["theme"]].append((idx, r["u_per_$"]))
-        for t, lst in by_theme.items():
-            lst_sorted = sorted(lst, key=lambda x: x[1], reverse=True)
-            keep.extend([idx for idx,_ in lst_sorted[:theme_cap]])
-        sel = sel.loc[sorted(set(keep))].copy()
-
-    if not sel.empty and float(sel["rerelease_risk"].mean()) > max_avg_risk:
-        sel["u_per_$"] = sel.apply(lambda r: hybrid_utility(r, a_score=a, b_roi=b, c_profit=c), axis=1) / sel["target_buy_price"]
-        while not sel.empty and float(sel["rerelease_risk"].mean()) > max_avg_risk:
-            drop_idx = sel.sort_values("u_per_$", ascending=True).index[0]
-            sel = sel.drop(index=drop_idx)
-
-    spend = float(sel["target_buy_price"].sum())
-    return sel.sort_values("score", ascending=False), spend
-
-# ---------------------- Basket UI ----------------------
-
-st.subheader("Suggested basket under your budget")
-
-budget_total = st.number_input("Total budget", min_value=0.0, value=500.0, step=50.0)
-
-col1, col2, col3 = st.columns(3)
-with col1:
-    theme_cap = st.number_input("Max sets per theme", min_value=1, value=2, step=1)
-with col2:
-    min_liq = st.number_input("Min 30-day units sold", min_value=0, value=50, step=10)
-with col3:
-    max_avg_risk = st.slider("Max average risk", 0.0, 1.0, 0.30, 0.01)
-
-col4, col5, col6 = st.columns(3)
-with col4:
-    prefer_path = st.radio("ROI path", ["Sealed", "Part-out"], horizontal=True, index=0)
-with col5:
-    roi_floor = st.slider("Per-set ROI floor", 0.0, 1.0, 0.00, 0.01)
-with col6:
-    st.write("Objective mix")
-    wS = st.slider("Score", 0.0, 1.0, 0.60, 0.05)
-    wR = st.slider("ROI",   0.0, 1.0, 0.30, 0.05)
-    wP = st.slider("Profit",0.0, 1.0, 0.10, 0.05)
-
-basket, spend = suggest_basket_optimized(
-    df,
-    budget_total=budget_total,
-    objective_weights=(wS, wR, wP),
-    theme_cap=int(theme_cap),
-    min_liquidity_30d=int(min_liq),
-    max_avg_risk=float(max_avg_risk),
-    prefer_sealed=(prefer_path == "Sealed"),
-    require_roi_floor=float(roi_floor)
-)
-
-if basket.empty:
-    st.info("No combination met the constraints.")
-else:
-    if prefer_path == "Sealed":
-        basket["est_profit"] = basket["current_new_price"] - basket["target_buy_price"]
-    else:
-        basket["est_profit"] = 0.7 * basket["part_out_value"] - basket["target_buy_price"]
-
-    total_profit = float(basket["est_profit"].sum())
-    est_roi_pct = total_profit / spend if spend > 0 else 0.0
-
-    view = basket[["score","set_num","name","theme","target_buy_price","est_profit","rerelease_risk"]].copy()
-    view["target_buy_price"] = view["target_buy_price"].map(lambda x: f"${x:,.2f}")
-    view["est_profit"] = view["est_profit"].map(lambda x: f"${x:,.2f}")
-    st.dataframe(view.reset_index(drop=True), use_container_width=True, height=280)
-
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Planned spend", f"${spend:,.2f}")
-    c2.metric("Estimated profit", f"${total_profit:,.2f}")
-    c3.metric("Estimated ROI (basket)", f"{est_roi_pct*100:.1f}%")
+if show_debug:
+    st.markdown("---")
+    st.write("Debug columns")
+    st.dataframe(df, use_container_width=True)
