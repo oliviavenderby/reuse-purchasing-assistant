@@ -1,0 +1,6 @@
+streamlit
+pandas
+numpy
+requests
+requests-oauthlib
+python-dateutil
