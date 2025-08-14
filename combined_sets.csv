@@ -1,0 +1,7 @@
+set_num,name,theme,year,pieces,minifigs,retail_price,current_value_new,current_value_used,forecast_new_2y,forecast_new_5y,forecast_growth_2y_pct,forecast_growth_5y_pct,growth_last_year_pct,growth_12m_pct,bl_current_avg_new,bl_qty_new,bl_lots_new,bl_current_avg_used,bl_qty_used,bl_lots_used,bl_6mo_avg_new,bl_sold_qty_new,bl_times_sold_new,bl_6mo_avg_used,bl_sold_qty_used,bl_times_sold_used,brickset_rating,users_owned,users_wanted
+10276-1,Colosseum,Icons,2020,9036,,549.99,1229.94,592.91,1373.03,1747.82,11.63,42.11,2.0,3.13,1177.26,34,32,659.14,14,12,794.83,38,36,573.08,21,21,4.2,3717,3947
+10265-1,Ford Mustang,Creator Expert,2019,1471,,149.99,219.0,179.0,260.0,310.0,9.0,28.0,4.0,3.5,210.5,80,65,175.25,60,50,185.0,120,110,160.0,95,90,4.6,15000,11000
+21319-1,Central Perk,Ideas,2019,1070,7.0,59.99,85.0,70.0,95.0,115.0,5.0,18.0,1.5,1.2,82.5,140,120,68.0,80,70,79.0,400,380,64.0,350,340,4.7,52000,60000
+71741-1,NINJAGO City Gardens,NINJAGO,2021,5685,20.0,299.99,379.0,319.0,430.0,530.0,8.0,26.0,2.2,2.5,365.0,55,40,315.0,40,32,340.0,90,85,300.0,70,65,4.8,18000,22000
+42115-1,Lamborghini Sián FKP 37,Technic,2020,3696,,379.99,449.0,399.0,520.0,700.0,7.0,30.0,1.8,2.1,440.0,45,40,398.0,35,30,420.0,75,72,390.0,60,58,4.5,12000,15000
+21058-1,Great Pyramid of Giza,Architecture,2022,1476,,129.99,150.0,125.0,175.0,210.0,6.0,26.0,2.0,2.3,148.0,60,55,126.0,45,40,140.0,85,80,118.0,70,66,4.4,8000,9500
